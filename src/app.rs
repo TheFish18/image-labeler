@@ -565,7 +565,7 @@ impl LabelerApp {
         }
         if !image.source_format.allows_transform_export() {
             self.status =
-                "Rotation and mirroring are disabled for DICOM/DICONDE images".to_string();
+                "Saving transformed output is disabled for DICOM/DICONDE images".to_string();
             return;
         }
 
@@ -604,12 +604,8 @@ impl LabelerApp {
     }
 
     fn rotate_left(&mut self) {
-        let Some(image) = &self.image else {
+        if self.image.is_none() {
             self.status = "Load an image first".to_string();
-            return;
-        };
-        if !image.source_format.allows_transform_export() {
-            self.status = "Rotation is disabled for DICOM/DICONDE images".to_string();
             return;
         }
         self.image_transform.rotate_left();
@@ -618,12 +614,8 @@ impl LabelerApp {
     }
 
     fn rotate_right(&mut self) {
-        let Some(image) = &self.image else {
+        if self.image.is_none() {
             self.status = "Load an image first".to_string();
-            return;
-        };
-        if !image.source_format.allows_transform_export() {
-            self.status = "Rotation is disabled for DICOM/DICONDE images".to_string();
             return;
         }
         self.image_transform.rotate_right();
@@ -632,12 +624,8 @@ impl LabelerApp {
     }
 
     fn toggle_mirror_horizontal(&mut self) {
-        let Some(image) = &self.image else {
+        if self.image.is_none() {
             self.status = "Load an image first".to_string();
-            return;
-        };
-        if !image.source_format.allows_transform_export() {
-            self.status = "Mirroring is disabled for DICOM/DICONDE images".to_string();
             return;
         }
         self.image_transform.toggle_mirror_horizontal();
@@ -646,12 +634,8 @@ impl LabelerApp {
     }
 
     fn toggle_mirror_vertical(&mut self) {
-        let Some(image) = &self.image else {
+        if self.image.is_none() {
             self.status = "Load an image first".to_string();
-            return;
-        };
-        if !image.source_format.allows_transform_export() {
-            self.status = "Mirroring is disabled for DICOM/DICONDE images".to_string();
             return;
         }
         self.image_transform.toggle_mirror_vertical();
@@ -1121,7 +1105,7 @@ impl LabelerApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let Some(texture) = &self.texture else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Select a PNG or TIFF from the browser panel.");
+                    ui.label("Select a PNG, TIFF, or DICOM image from the browser panel.");
                 });
                 return;
             };
@@ -1758,7 +1742,7 @@ fn is_supported_image_path(path: &Path) -> bool {
             .and_then(|value| value.to_str())
             .map(|value| value.to_ascii_lowercase())
             .as_deref(),
-        Some("png" | "tif" | "tiff")
+        Some("png" | "tif" | "tiff" | "dcm" | "dicom" | "diconde")
     )
 }
 

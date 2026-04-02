@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 blake3 = "1.5"
+dicom-object = "0.6"
 eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 png = "0.17"
 rusqlite = { version = "0.31", features = ["bundled"] }

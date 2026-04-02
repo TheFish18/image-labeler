@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use dicom_object::open_file;
 use eframe::egui::{Color32, ColorImage};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use sha2::{Digest, Sha256};
@@ -13,6 +14,7 @@ use tiff::{
 pub enum SourceFormat {
     Png,
     Tiff,
+    Dicom,
 }
 
 impl SourceFormat {
@@ -198,11 +200,126 @@ pub fn load_image(path: &Path) -> Result<LoadedImage> {
     match extension.as_deref() {
         Some("png") => load_png(path),
         Some("tif") | Some("tiff") => load_tiff(path),
-        Some("dcm") | Some("dicom") | Some("diconde") => {
-            bail!("DICOM/DICONDE loading is not implemented")
-        }
-        _ => bail!("only PNG and TIFF files are supported"),
+        Some("dcm") | Some("dicom") | Some("diconde") => load_dicom(path),
+        _ => bail!("only PNG, TIFF, and DICOM files are supported"),
     }
+}
+
+fn load_dicom(path: &Path) -> Result<LoadedImage> {
+    let object = open_file(path).with_context(|| format!("failed to open {}", path.display()))?;
+
+    let rows: u16 = object
+        .element_by_name("Rows")
+        .context("missing DICOM Rows")?
+        .to_int()
+        .context("invalid DICOM Rows")?;
+    let columns: u16 = object
+        .element_by_name("Columns")
+        .context("missing DICOM Columns")?
+        .to_int()
+        .context("invalid DICOM Columns")?;
+    let samples_per_pixel: u16 = object
+        .element_by_name("SamplesPerPixel")
+        .ok()
+        .and_then(|element| element.to_int().ok())
+        .unwrap_or(1);
+    if samples_per_pixel != 1 {
+        bail!("only single-sample grayscale DICOM files are supported");
+    }
+
+    let bits_allocated: u16 = object
+        .element_by_name("BitsAllocated")
+        .context("missing DICOM BitsAllocated")?
+        .to_int()
+        .context("invalid DICOM BitsAllocated")?;
+    let bits_stored: u16 = object
+        .element_by_name("BitsStored")
+        .ok()
+        .and_then(|element| element.to_int().ok())
+        .unwrap_or(bits_allocated);
+    let photometric = object
+        .element_by_name("PhotometricInterpretation")
+        .context("missing DICOM PhotometricInterpretation")?
+        .to_str()
+        .context("invalid DICOM PhotometricInterpretation")?
+        .to_ascii_uppercase();
+    let transfer_syntax = object
+        .element_by_name("TransferSyntaxUID")
+        .ok()
+        .and_then(|element| element.to_str().ok())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "1.2.840.10008.1.2".to_string());
+    let big_endian = transfer_syntax == "1.2.840.10008.1.2.2";
+
+    let pixel_data = object
+        .element_by_name("PixelData")
+        .context("missing DICOM PixelData")?
+        .to_bytes()
+        .context("unsupported or invalid DICOM PixelData")?;
+
+    let pixel_count = rows as usize * columns as usize;
+    let (bit_depth, hash, display, raw_pixels) = match bits_allocated {
+        8 => {
+            if pixel_data.len() < pixel_count {
+                bail!("DICOM PixelData was shorter than expected");
+            }
+            let mut values = pixel_data[..pixel_count].to_vec();
+            if photometric == "MONOCHROME1" {
+                for value in &mut values {
+                    *value = u8::MAX - *value;
+                }
+            } else if photometric != "MONOCHROME2" {
+                bail!("only MONOCHROME1 and MONOCHROME2 DICOM images are supported");
+            }
+            let hash = hash_raw_pixels(&values);
+            let display = make_display_image_u8(columns as usize, rows as usize, &values)?;
+            (8, hash, display, RawPixels::U8(values))
+        }
+        16 => {
+            if pixel_data.len() < pixel_count * 2 {
+                bail!("DICOM PixelData was shorter than expected");
+            }
+            let mask = if bits_stored >= 16 {
+                u16::MAX
+            } else {
+                ((1u32 << bits_stored) - 1) as u16
+            };
+            let mut values = pixel_data[..pixel_count * 2]
+                .chunks_exact(2)
+                .map(|chunk| {
+                    let value = if big_endian {
+                        u16::from_be_bytes([chunk[0], chunk[1]])
+                    } else {
+                        u16::from_le_bytes([chunk[0], chunk[1]])
+                    };
+                    value & mask
+                })
+                .collect::<Vec<_>>();
+            if photometric == "MONOCHROME1" {
+                for value in &mut values {
+                    *value = mask - *value;
+                }
+            } else if photometric != "MONOCHROME2" {
+                bail!("only MONOCHROME1 and MONOCHROME2 DICOM images are supported");
+            }
+            let native = u16s_to_native_bytes(&values);
+            let hash = hash_raw_pixels(&native);
+            let display = make_display_image_u16(columns as usize, rows as usize, &values)?;
+            (16, hash, display, RawPixels::U16(values))
+        }
+        _ => bail!("only 8-bit and 16-bit grayscale DICOM files are supported"),
+    };
+
+    Ok(LoadedImage {
+        path: path.display().to_string(),
+        width: columns as usize,
+        height: rows as usize,
+        bit_depth,
+        hash,
+        display,
+        raw_pixels,
+        source_format: SourceFormat::Dicom,
+    })
 }
 
 fn load_png(path: &Path) -> Result<LoadedImage> {

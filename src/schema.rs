@@ -172,15 +172,29 @@ pub fn ensure_default_files() -> Result<()> {
 }
 
 pub fn config_dir() -> Result<PathBuf> {
-    let base = match env::var_os("XDG_CONFIG_HOME") {
-        Some(value) if !value.is_empty() => PathBuf::from(value),
-        _ => {
-            let home = env::var_os("HOME")
-                .context("HOME is not set and XDG_CONFIG_HOME is unavailable")?;
-            PathBuf::from(home).join(".config")
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(value) = env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+            return Ok(PathBuf::from(value).join("image-labeler"));
         }
-    };
-    Ok(base.join("image-labeler"))
+        if let Some(value) = env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty()) {
+            return Ok(PathBuf::from(value).join("image-labeler"));
+        }
+        bail!("APPDATA and LOCALAPPDATA are unavailable");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let base = match env::var_os("XDG_CONFIG_HOME") {
+            Some(value) if !value.is_empty() => PathBuf::from(value),
+            _ => {
+                let home = env::var_os("HOME")
+                    .context("HOME is not set and XDG_CONFIG_HOME is unavailable")?;
+                PathBuf::from(home).join(".config")
+            }
+        };
+        Ok(base.join("image-labeler"))
+    }
 }
 
 pub fn list_schema_names() -> Result<Vec<String>> {
