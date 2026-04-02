@@ -63,10 +63,3 @@ pub struct Annotation {
     pub color_rgb: [u8; 3],
     pub shape: Shape,
 }
-
-#[derive(Clone, Debug)]
-pub struct LabelClass {
-    pub id: i64,
-    pub name: String,
-    pub color_rgb: [u8; 3],
-}

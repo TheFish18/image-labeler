@@ -2,6 +2,7 @@ mod app;
 mod db;
 mod geometry;
 mod image_data;
+mod schema;
 
 use app::LabelerApp;
 
