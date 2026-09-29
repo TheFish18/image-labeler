@@ -15,9 +15,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const DB_PATH: &str = "labels.sqlite3";
 const HANDLE_RADIUS: f32 = 5.0;
 const HANDLE_HIT_RADIUS: f32 = 10.0;
+const DRAG_BRIGHTNESS_PER_PIXEL: f32 = 0.004;
+const DRAG_CONTRAST_PER_PIXEL: f32 = 0.005;
 
 #[derive(Clone)]
 struct LabelBinding {
@@ -62,6 +63,7 @@ pub struct LabelerApp {
     pan: Vec2,
     brightness: f32,
     contrast: f32,
+    show_annotations: bool,
     image_transform: ImageTransform,
     schema_names: Vec<String>,
     selected_schema_name: String,
@@ -72,8 +74,13 @@ pub struct LabelerApp {
 }
 
 impl LabelerApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
-        let db = Database::open(&PathBuf::from(DB_PATH))?;
+    pub fn new(cc: &eframe::CreationContext<'_>, db_path: PathBuf) -> Result<Self> {
+        if let Some(parent) = db_path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create database directory {}", parent.display())
+            })?;
+        }
+        let db = Database::open(&db_path)?;
         let schema_names = schema::list_schema_names()?;
         let selected_schema_name = schema_names
             .iter()
@@ -100,7 +107,7 @@ impl LabelerApp {
             transform_save_path_input: String::new(),
             status: format!(
                 "Database: {} | Schemas: {}",
-                DB_PATH,
+                db_path.display(),
                 schema::config_dir()?.display()
             ),
             rect_start: None,
@@ -112,6 +119,7 @@ impl LabelerApp {
             pan: Vec2::ZERO,
             brightness: 0.0,
             contrast: 1.0,
+            show_annotations: true,
             image_transform: ImageTransform::default(),
             schema_names,
             selected_schema_name: selected_schema_name.clone(),
@@ -643,6 +651,18 @@ impl LabelerApp {
         self.status = "Toggled vertical mirror".to_string();
     }
 
+    fn toggle_annotations(&mut self) {
+        self.show_annotations = !self.show_annotations;
+        if !self.show_annotations {
+            self.annotation_edit = None;
+        }
+        self.status = if self.show_annotations {
+            "Segmentations shown".to_string()
+        } else {
+            "Segmentations hidden".to_string()
+        };
+    }
+
     fn handle_keybindings(&mut self, ctx: &EguiContext) {
         if ctx.wants_keyboard_input() {
             return;
@@ -675,6 +695,10 @@ impl LabelerApp {
         }
         if keybind_pressed(ctx, &actions.save_transformed_image.chord) {
             self.save_transformed_image();
+            return;
+        }
+        if keybind_pressed(ctx, &actions.toggle_annotations.chord) {
+            self.toggle_annotations();
             return;
         }
 
@@ -873,6 +897,20 @@ impl LabelerApp {
                                     )
                                     .changed();
                                 ui.label(format!("Zoom: {:.0}%", self.zoom * 100.0));
+                                let toggle_text = if self.show_annotations {
+                                    "Hide segmentations"
+                                } else {
+                                    "Show segmentations"
+                                };
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(self.show_annotations, toggle_text)
+                                        .clicked()
+                                    {
+                                        self.toggle_annotations();
+                                    }
+                                    ui.monospace(&self.app_keybinds.toggle_annotations.chord);
+                                });
                                 if ui.button("Reset view").clicked() {
                                     self.reset_view(ctx);
                                 } else if brightness_changed || contrast_changed {
@@ -1052,6 +1090,9 @@ impl LabelerApp {
                                     ui.label(format!("Current label: {}", label.name));
                                     ui.label(format!("Shape type: {}", label.label_type.as_str()));
                                     ui.label("Right or middle drag pans");
+                                    ui.label(
+                                        "Shift + right drag: up/down brightness, left/right contrast",
+                                    );
                                     ui.label("Mouse wheel zooms");
                                     ui.label("Drag a selected vertex to edit an annotation");
                                     match label.label_type {
@@ -1147,14 +1188,32 @@ impl LabelerApp {
         image_rect: Rect,
         fit_scale: f32,
     ) {
+        if self.image.is_none() {
+            return;
+        }
+
+        let shift_held = ctx.input(|input| input.modifiers.shift);
+        if response.dragged_by(egui::PointerButton::Secondary) && shift_held {
+            let delta = response.drag_delta();
+            if delta != Vec2::ZERO {
+                self.brightness = (self.brightness - delta.y * DRAG_BRIGHTNESS_PER_PIXEL)
+                    .clamp(-1.0, 1.0);
+                self.contrast =
+                    (self.contrast * (delta.x * DRAG_CONTRAST_PER_PIXEL).exp()).clamp(0.1, 3.0);
+                self.refresh_texture();
+                ctx.request_repaint();
+            }
+        }
+
         let Some(image) = &self.image else {
             return;
         };
 
         if response.hovered() {
             let pointer_delta = ctx.input(|input| input.pointer.delta());
-            let panning =
-                ctx.input(|input| input.pointer.secondary_down() || input.pointer.middle_down());
+            let panning = ctx.input(|input| {
+                input.pointer.middle_down() || (input.pointer.secondary_down() && !shift_held)
+            });
             if panning {
                 self.pan += pointer_delta;
                 ctx.request_repaint();
@@ -1316,6 +1375,9 @@ impl LabelerApp {
     }
 
     fn pick_annotation_handle(&self, point: Point, scale: f32) -> Option<(i64, usize)> {
+        if !self.show_annotations {
+            return None;
+        }
         let max_distance = HANDLE_HIT_RADIUS / scale.max(0.01);
         let mut best: Option<(i64, usize, f32)> = None;
 
@@ -1355,6 +1417,9 @@ impl LabelerApp {
     }
 
     fn pick_annotation(&self, point: Point) -> Option<i64> {
+        if !self.show_annotations {
+            return None;
+        }
         if let Some(selected_id) = self.selected_annotation_id {
             if let Some(annotation) = self
                 .annotations
@@ -1382,7 +1447,12 @@ impl LabelerApp {
             return;
         };
 
-        for annotation in &self.annotations {
+        let visible_annotations: &[Annotation] = if self.show_annotations {
+            &self.annotations
+        } else {
+            &[]
+        };
+        for annotation in visible_annotations {
             let is_selected = self.selected_annotation_id == Some(annotation.id);
             let color = rgb(annotation.color_rgb);
             let stroke = Stroke::new(if is_selected { 3.0 } else { 2.0 }, color);
@@ -1467,6 +1537,11 @@ fn show_action_keybind_editor(ui: &mut egui::Ui, keybinds: &mut AppKeybinds) {
         ui,
         "Save transformed image",
         &mut keybinds.save_transformed_image.chord,
+    );
+    show_named_keybind(
+        ui,
+        "Toggle segmentations",
+        &mut keybinds.toggle_annotations.chord,
     );
 }
 

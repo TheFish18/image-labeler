@@ -23,7 +23,12 @@ Small native Rust app for labeling grayscale PNG and TIFF images.
 ~/.cargo/bin/cargo run
 ```
 
-The app creates `labels.sqlite3` in the project directory.
+By default the app creates `labels.sqlite3` in the current working directory. Use `--db` to store labels in a different database (missing parent directories are created):
+
+```bash
+~/.cargo/bin/cargo run -- --db path/to/labels.sqlite3
+image-labeler --db path/to/labels.sqlite3
+```
 
 On first launch it also creates a default schema file at:
 
@@ -109,7 +114,9 @@ chord = "shift+l"
 
 - Mouse wheel zooms.
 - Right or middle drag pans.
+- Shift + right drag up/down adjusts brightness; Shift + right drag left/right adjusts contrast.
 - `Brightness` and `Contrast` only affect display.
+- `Hide segmentations` (default `shift+s`, app keybind `toggle_annotations`) toggles annotation overlays; hidden annotations cannot be selected or edited.
 - `Reset view` restores zoom, pan, brightness, and contrast without touching saved labels.
 
 ## Transform Export

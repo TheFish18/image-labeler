@@ -96,6 +96,8 @@ pub struct AppKeybinds {
     pub mirror_vertical: KeybindConfig,
     #[serde(default = "default_save_transformed_keybind")]
     pub save_transformed_image: KeybindConfig,
+    #[serde(default = "default_toggle_annotations_keybind")]
+    pub toggle_annotations: KeybindConfig,
 }
 
 impl Default for AppKeybinds {
@@ -108,6 +110,7 @@ impl Default for AppKeybinds {
             mirror_horizontal: default_mirror_horizontal_keybind(),
             mirror_vertical: default_mirror_vertical_keybind(),
             save_transformed_image: default_save_transformed_keybind(),
+            toggle_annotations: default_toggle_annotations_keybind(),
         }
     }
 }
@@ -151,6 +154,12 @@ fn default_mirror_vertical_keybind() -> KeybindConfig {
 fn default_save_transformed_keybind() -> KeybindConfig {
     KeybindConfig {
         chord: "shift+w".to_string(),
+    }
+}
+
+fn default_toggle_annotations_keybind() -> KeybindConfig {
+    KeybindConfig {
+        chord: "shift+s".to_string(),
     }
 }
 
