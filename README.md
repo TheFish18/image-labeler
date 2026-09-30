@@ -119,6 +119,13 @@ chord = "shift+l"
 - `Hide segmentations` (default `shift+s`, app keybind `toggle_annotations`) toggles annotation overlays; hidden annotations cannot be selected or edited.
 - `Reset view` restores zoom, pan, brightness, and contrast without touching saved labels.
 
+## Editing
+
+- Click an annotation to select it, then press `Delete` (app keybind `delete_annotation`) to remove it.
+- `Ctrl+Z` undoes and `Ctrl+Shift+Z` redoes (app keybinds `undo` / `redo`). This covers creating, deleting, and editing annotations and toggling global labels.
+- While drawing a polygon, `Enter` finishes it, `Escape` cancels it, and undo removes the last vertex.
+- Undo history is kept in memory per image for the current session only (up to 200 steps); it is never written to the database.
+
 ## Transform Export
 
 - `Rotate left`, `Rotate right`, `Mirror horizontal`, and `Mirror vertical` only affect the current in-app view and export result.

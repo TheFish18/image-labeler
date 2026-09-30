@@ -193,7 +193,7 @@ impl Database {
 
         let mut annotations = Vec::new();
         for row in base_rows {
-            let (id, _class_id, class_name, color_rgb, shape_type, x, y, width, height) = row?;
+            let (id, class_id, class_name, color_rgb, shape_type, x, y, width, height) = row?;
             let shape = if shape_type == "rectangle" {
                 Shape::Rectangle {
                     min: Point::new(x.unwrap_or_default(), y.unwrap_or_default()),
@@ -209,6 +209,7 @@ impl Database {
             };
             annotations.push(Annotation {
                 id,
+                class_id,
                 class_name,
                 color_rgb,
                 shape,
@@ -236,15 +237,24 @@ impl Database {
         Ok(points)
     }
 
-    pub fn insert_annotation(&self, image_hash: &str, class_id: i64, shape: &Shape) -> Result<i64> {
+    /// Inserts an annotation. Pass `Some(id)` to restore a previously deleted
+    /// annotation under its original id; `None` allocates a new id.
+    pub fn insert_annotation(
+        &self,
+        id: Option<i64>,
+        image_hash: &str,
+        class_id: i64,
+        shape: &Shape,
+    ) -> Result<i64> {
         match shape {
             Shape::Rectangle { min, max } => {
                 self.conn.execute(
                     "
-                    INSERT INTO annotations(image_hash, class_id, shape_type, x, y, width, height)
-                    VALUES (?1, ?2, 'rectangle', ?3, ?4, ?5, ?6)
+                    INSERT INTO annotations(id, image_hash, class_id, shape_type, x, y, width, height)
+                    VALUES (?1, ?2, ?3, 'rectangle', ?4, ?5, ?6, ?7)
                     ",
                     params![
+                        id,
                         image_hash,
                         class_id,
                         min.x,
@@ -257,10 +267,10 @@ impl Database {
             Shape::Polygon { points } => {
                 self.conn.execute(
                     "
-                    INSERT INTO annotations(image_hash, class_id, shape_type)
-                    VALUES (?1, ?2, 'polygon')
+                    INSERT INTO annotations(id, image_hash, class_id, shape_type)
+                    VALUES (?1, ?2, ?3, 'polygon')
                     ",
-                    params![image_hash, class_id],
+                    params![id, image_hash, class_id],
                 )?;
                 let annotation_id = self.conn.last_insert_rowid();
                 for (index, point) in points.iter().enumerate() {
@@ -327,6 +337,38 @@ impl Database {
             "DELETE FROM annotations WHERE id = ?1",
             params![annotation_id],
         )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deleted_annotation_restores_with_original_id() -> Result<()> {
+        let db = Database::open(Path::new(":memory:"))?;
+        db.upsert_image("hash", 10, 10, 8, "image.png")?;
+        let class_id = db.upsert_class("label", [1, 2, 3])?;
+        let polygon = Shape::Polygon {
+            points: vec![Point::new(1.0, 1.0), Point::new(5.0, 1.0), Point::new(3.0, 4.0)],
+        };
+
+        let id = db.insert_annotation(None, "hash", class_id, &polygon)?;
+        db.delete_annotation(id)?;
+        assert!(db.list_annotations("hash")?.is_empty());
+
+        db.insert_annotation(Some(id), "hash", class_id, &polygon)?;
+        let restored = db.list_annotations("hash")?;
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].id, id);
+        assert_eq!(restored[0].class_id, class_id);
+        assert_eq!(restored[0].shape, polygon);
+
+        // AUTOINCREMENT never hands a deleted id to a new annotation.
+        db.delete_annotation(id)?;
+        let next_id = db.insert_annotation(None, "hash", class_id, &polygon)?;
+        assert!(next_id > id);
         Ok(())
     }
 }

@@ -98,6 +98,12 @@ pub struct AppKeybinds {
     pub save_transformed_image: KeybindConfig,
     #[serde(default = "default_toggle_annotations_keybind")]
     pub toggle_annotations: KeybindConfig,
+    #[serde(default = "default_undo_keybind")]
+    pub undo: KeybindConfig,
+    #[serde(default = "default_redo_keybind")]
+    pub redo: KeybindConfig,
+    #[serde(default = "default_delete_annotation_keybind")]
+    pub delete_annotation: KeybindConfig,
 }
 
 impl Default for AppKeybinds {
@@ -111,6 +117,9 @@ impl Default for AppKeybinds {
             mirror_vertical: default_mirror_vertical_keybind(),
             save_transformed_image: default_save_transformed_keybind(),
             toggle_annotations: default_toggle_annotations_keybind(),
+            undo: default_undo_keybind(),
+            redo: default_redo_keybind(),
+            delete_annotation: default_delete_annotation_keybind(),
         }
     }
 }
@@ -160,6 +169,24 @@ fn default_save_transformed_keybind() -> KeybindConfig {
 fn default_toggle_annotations_keybind() -> KeybindConfig {
     KeybindConfig {
         chord: "shift+s".to_string(),
+    }
+}
+
+fn default_undo_keybind() -> KeybindConfig {
+    KeybindConfig {
+        chord: "ctrl+z".to_string(),
+    }
+}
+
+fn default_redo_keybind() -> KeybindConfig {
+    KeybindConfig {
+        chord: "ctrl+shift+z".to_string(),
+    }
+}
+
+fn default_delete_annotation_keybind() -> KeybindConfig {
+    KeybindConfig {
+        chord: "delete".to_string(),
     }
 }
 

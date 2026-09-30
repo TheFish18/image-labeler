@@ -59,6 +59,7 @@ impl Shape {
 #[derive(Clone, Debug)]
 pub struct Annotation {
     pub id: i64,
+    pub class_id: i64,
     pub class_name: String,
     pub color_rgb: [u8; 3],
     pub shape: Shape,

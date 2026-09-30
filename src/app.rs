@@ -10,7 +10,7 @@ use eframe::egui::{
     Rect, Sense, Shape as EguiShape, Stroke, TextureHandle, TextureOptions, TopBottomPanel, Vec2,
 };
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -19,6 +19,7 @@ const HANDLE_RADIUS: f32 = 5.0;
 const HANDLE_HIT_RADIUS: f32 = 10.0;
 const DRAG_BRIGHTNESS_PER_PIXEL: f32 = 0.004;
 const DRAG_CONTRAST_PER_PIXEL: f32 = 0.005;
+const MAX_HISTORY: usize = 200;
 
 #[derive(Clone)]
 struct LabelBinding {
@@ -34,6 +35,41 @@ struct AnnotationEditState {
     annotation_id: i64,
     handle_index: usize,
     original_shape: Shape,
+}
+
+/// A reversible user edit. Kept in memory only; never written to the database.
+#[derive(Clone)]
+enum EditAction {
+    CreateAnnotation(Annotation),
+    DeleteAnnotation(Annotation),
+    UpdateAnnotation {
+        annotation_id: i64,
+        before: Shape,
+        after: Shape,
+    },
+    SetImageClassification {
+        class_id: i64,
+        present: bool,
+    },
+}
+
+impl EditAction {
+    fn describe(&self) -> String {
+        match self {
+            Self::CreateAnnotation(annotation) => format!("create annotation #{}", annotation.id),
+            Self::DeleteAnnotation(annotation) => format!("delete annotation #{}", annotation.id),
+            Self::UpdateAnnotation { annotation_id, .. } => {
+                format!("edit annotation #{annotation_id}")
+            }
+            Self::SetImageClassification { .. } => "global label change".to_string(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct EditHistory {
+    undo: Vec<EditAction>,
+    redo: Vec<EditAction>,
 }
 
 #[derive(Clone, Copy)]
@@ -59,6 +95,7 @@ pub struct LabelerApp {
     polygon_points: Vec<Point>,
     selected_annotation_id: Option<i64>,
     annotation_edit: Option<AnnotationEditState>,
+    histories: HashMap<String, EditHistory>,
     zoom: f32,
     pan: Vec2,
     brightness: f32,
@@ -115,6 +152,7 @@ impl LabelerApp {
             polygon_points: Vec::new(),
             selected_annotation_id: None,
             annotation_edit: None,
+            histories: HashMap::new(),
             zoom: 1.0,
             pan: Vec2::ZERO,
             brightness: 0.0,
@@ -411,11 +449,19 @@ impl LabelerApp {
 
         match self
             .db
-            .insert_annotation(&image.hash, class_id, &shape)
-            .and_then(|_| self.db.list_annotations(&image.hash))
+            .insert_annotation(None, &image.hash, class_id, &shape)
+            .and_then(|id| Ok((id, self.db.list_annotations(&image.hash)?)))
         {
-            Ok(annotations) => {
+            Ok((annotation_id, annotations)) => {
                 self.annotations = annotations;
+                if let Some(annotation) = self
+                    .annotations
+                    .iter()
+                    .find(|annotation| annotation.id == annotation_id)
+                    .cloned()
+                {
+                    self.record_edit(EditAction::CreateAnnotation(annotation));
+                }
                 self.status = "Annotation saved".to_string();
                 self.clear_transient_state();
             }
@@ -426,6 +472,16 @@ impl LabelerApp {
     fn delete_selected_annotation(&mut self) {
         let Some(annotation_id) = self.selected_annotation_id else {
             self.status = "No annotation selected".to_string();
+            return;
+        };
+        let Some(deleted) = self
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == annotation_id)
+            .cloned()
+        else {
+            self.status = "Selected annotation no longer exists".to_string();
+            self.selected_annotation_id = None;
             return;
         };
 
@@ -439,6 +495,7 @@ impl LabelerApp {
                 self.annotations = annotations;
                 self.selected_annotation_id = None;
                 self.annotation_edit = None;
+                self.record_edit(EditAction::DeleteAnnotation(deleted));
                 self.status = format!("Deleted annotation {annotation_id}");
             }
             Err(error) => self.status = format!("Delete failed: {error:#}"),
@@ -450,12 +507,16 @@ impl LabelerApp {
             self.status = "Load an image first".to_string();
             return;
         };
+        if self.image_classifications.contains(&class_id) == present {
+            return;
+        }
 
         match self
             .db
             .set_image_classification(&image.hash, class_id, present)
         {
             Ok(()) => {
+                self.record_edit(EditAction::SetImageClassification { class_id, present });
                 if present {
                     self.image_classifications.insert(class_id);
                 } else {
@@ -523,6 +584,9 @@ impl LabelerApp {
             return;
         };
         let shape = annotation.shape.clone();
+        if shape == edit.original_shape {
+            return;
+        }
         if let Err(error) = self.db.update_annotation(edit.annotation_id, &shape) {
             if let Some(annotation) = self.annotation_mut(edit.annotation_id) {
                 annotation.shape = edit.original_shape;
@@ -530,7 +594,136 @@ impl LabelerApp {
             self.status = format!("Failed to update annotation: {error:#}");
             return;
         }
+        self.record_edit(EditAction::UpdateAnnotation {
+            annotation_id: edit.annotation_id,
+            before: edit.original_shape,
+            after: shape,
+        });
         self.status = format!("Updated annotation {}", edit.annotation_id);
+    }
+
+    fn record_edit(&mut self, action: EditAction) {
+        let Some(image) = &self.image else {
+            return;
+        };
+        let history = self.histories.entry(image.hash.clone()).or_default();
+        history.redo.clear();
+        history.undo.push(action);
+        if history.undo.len() > MAX_HISTORY {
+            history.undo.remove(0);
+        }
+    }
+
+    /// Applies `action` to the database (or its inverse when `reverse` is set)
+    /// and reloads the current image's annotations and global labels.
+    fn apply_edit(&mut self, action: &EditAction, reverse: bool) -> Result<()> {
+        let image_hash = self.image.as_ref().context("image not loaded")?.hash.clone();
+        match (action, reverse) {
+            (EditAction::CreateAnnotation(annotation), false)
+            | (EditAction::DeleteAnnotation(annotation), true) => {
+                self.db.insert_annotation(
+                    Some(annotation.id),
+                    &image_hash,
+                    annotation.class_id,
+                    &annotation.shape,
+                )?;
+            }
+            (EditAction::CreateAnnotation(annotation), true)
+            | (EditAction::DeleteAnnotation(annotation), false) => {
+                self.db.delete_annotation(annotation.id)?;
+            }
+            (
+                EditAction::UpdateAnnotation {
+                    annotation_id,
+                    before,
+                    after,
+                },
+                reverse,
+            ) => {
+                let shape = if reverse { before } else { after };
+                self.db.update_annotation(*annotation_id, shape)?;
+            }
+            (EditAction::SetImageClassification { class_id, present }, reverse) => {
+                self.db
+                    .set_image_classification(&image_hash, *class_id, *present != reverse)?;
+            }
+        }
+
+        self.annotations = self.db.list_annotations(&image_hash)?;
+        self.image_classifications = self
+            .db
+            .list_image_classifications(&image_hash)?
+            .into_iter()
+            .collect();
+        if let Some(selected_id) = self.selected_annotation_id {
+            if !self
+                .annotations
+                .iter()
+                .any(|annotation| annotation.id == selected_id)
+            {
+                self.selected_annotation_id = None;
+            }
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self) {
+        if self.polygon_points.pop().is_some() {
+            self.status = "Removed last polygon vertex".to_string();
+            return;
+        }
+        self.step_history(true);
+    }
+
+    fn redo(&mut self) {
+        self.step_history(false);
+    }
+
+    fn step_history(&mut self, undo: bool) {
+        let Some(image_hash) = self.image.as_ref().map(|image| image.hash.clone()) else {
+            self.status = "Load an image first".to_string();
+            return;
+        };
+        self.clear_transient_state();
+
+        let history = self.histories.entry(image_hash.clone()).or_default();
+        let action = if undo {
+            history.undo.pop()
+        } else {
+            history.redo.pop()
+        };
+        let Some(action) = action else {
+            self.status = if undo { "Nothing to undo" } else { "Nothing to redo" }.to_string();
+            return;
+        };
+
+        let result = self.apply_edit(&action, undo);
+        let history = self.histories.entry(image_hash).or_default();
+        match result {
+            Ok(()) => {
+                self.status = format!(
+                    "{} {}",
+                    if undo { "Undid" } else { "Redid" },
+                    action.describe()
+                );
+                if undo {
+                    history.redo.push(action);
+                } else {
+                    history.undo.push(action);
+                }
+            }
+            Err(error) => {
+                self.status = format!(
+                    "{} failed: {error:#}",
+                    if undo { "Undo" } else { "Redo" }
+                );
+                if undo {
+                    history.undo.push(action);
+                } else {
+                    history.redo.push(action);
+                }
+            }
+        }
     }
 
     fn select_annotation(&mut self, annotation_id: i64) {
@@ -699,6 +892,22 @@ impl LabelerApp {
         }
         if keybind_pressed(ctx, &actions.toggle_annotations.chord) {
             self.toggle_annotations();
+            return;
+        }
+        if keybind_pressed(ctx, &actions.undo.chord) {
+            self.undo();
+            return;
+        }
+        if keybind_pressed(ctx, &actions.redo.chord) {
+            self.redo();
+            return;
+        }
+        if keybind_pressed(ctx, &actions.delete_annotation.chord) {
+            if !self.show_annotations {
+                self.status = "Show segmentations before deleting".to_string();
+            } else {
+                self.delete_selected_annotation();
+            }
             return;
         }
 
@@ -1095,6 +1304,7 @@ impl LabelerApp {
                                     );
                                     ui.label("Mouse wheel zooms");
                                     ui.label("Drag a selected vertex to edit an annotation");
+                                    ui.label("Click an annotation, then press Delete to remove it");
                                     match label.label_type {
                                         LabelType::Rectangle => {
                                             ui.label("Primary drag on empty space draws a rectangle");
@@ -1102,6 +1312,7 @@ impl LabelerApp {
                                         LabelType::Polygon => {
                                             ui.label("Primary click on empty space adds polygon vertices");
                                             ui.label("Press Enter or Finish to close");
+                                            ui.label("Press Escape or Cancel to discard");
                                             if ui.button("Finish polygon").clicked() {
                                                 let points = std::mem::take(&mut self.polygon_points);
                                                 self.save_shape(Shape::Polygon { points });
@@ -1134,9 +1345,23 @@ impl LabelerApp {
                                         self.select_annotation(annotation_id);
                                     }
                                 }
-                                if ui.button("Delete selected").clicked() {
-                                    self.delete_selected_annotation();
-                                }
+                                let actions = self.app_keybinds.clone();
+                                ui.horizontal(|ui| {
+                                    if ui.button("Delete selected").clicked() {
+                                        self.delete_selected_annotation();
+                                    }
+                                    ui.monospace(actions.delete_annotation.chord);
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Undo").clicked() {
+                                        self.undo();
+                                    }
+                                    ui.monospace(actions.undo.chord);
+                                    if ui.button("Redo").clicked() {
+                                        self.redo();
+                                    }
+                                    ui.monospace(actions.redo.chord);
+                                });
                             });
                     });
             });
@@ -1249,6 +1474,13 @@ impl LabelerApp {
                 }
                 ctx.request_repaint();
             }
+        }
+
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) && !self.polygon_points.is_empty()
+        {
+            self.polygon_points.clear();
+            self.status = "Polygon cancelled".to_string();
+            return;
         }
 
         if ctx.input(|input| input.key_pressed(egui::Key::Enter)) && self.polygon_points.len() >= 3
@@ -1543,6 +1775,13 @@ fn show_action_keybind_editor(ui: &mut egui::Ui, keybinds: &mut AppKeybinds) {
         "Toggle segmentations",
         &mut keybinds.toggle_annotations.chord,
     );
+    show_named_keybind(ui, "Undo", &mut keybinds.undo.chord);
+    show_named_keybind(ui, "Redo", &mut keybinds.redo.chord);
+    show_named_keybind(
+        ui,
+        "Delete selected annotation",
+        &mut keybinds.delete_annotation.chord,
+    );
 }
 
 fn show_named_keybind(ui: &mut egui::Ui, label: &str, value: &mut String) {
@@ -1766,6 +2005,7 @@ fn parse_key_name(token: &str) -> Option<Key> {
         "tab" => Some(Key::Tab),
         "backspace" => Some(Key::Backspace),
         "escape" | "esc" => Some(Key::Escape),
+        "delete" | "del" => Some(Key::Delete),
         _ => None,
     }
 }
@@ -1774,12 +2014,10 @@ fn keybind_pressed(ctx: &EguiContext, chord: &str) -> bool {
     let Some(parsed) = parse_keybind(chord) else {
         return false;
     };
+    // `matches_exact` accounts for egui mirroring `ctrl` into `command` on
+    // Windows/Linux, which a field-by-field comparison would reject.
     ctx.input(|input| {
-        input.key_pressed(parsed.key)
-            && input.modifiers.shift == parsed.modifiers.shift
-            && input.modifiers.ctrl == parsed.modifiers.ctrl
-            && input.modifiers.alt == parsed.modifiers.alt
-            && input.modifiers.command == parsed.modifiers.command
+        input.key_pressed(parsed.key) && input.modifiers.matches_exact(parsed.modifiers)
     })
 }
 
