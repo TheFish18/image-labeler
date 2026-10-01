@@ -111,7 +111,14 @@ pub struct LabelerApp {
 }
 
 impl LabelerApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, db_path: PathBuf) -> Result<Self> {
+    /// `initial_schema` selects a schema by name instead of the default one;
+    /// `browser_dir` sets where the file browser starts (default: the working directory).
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        db_path: PathBuf,
+        initial_schema: Option<String>,
+        browser_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         if let Some(parent) = db_path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
             fs::create_dir_all(parent).with_context(|| {
                 format!("failed to create database directory {}", parent.display())
@@ -119,15 +126,20 @@ impl LabelerApp {
         }
         let db = Database::open(&db_path)?;
         let schema_names = schema::list_schema_names()?;
-        let selected_schema_name = schema_names
-            .iter()
-            .find(|name| name.as_str() == "default")
-            .cloned()
+        let selected_schema_name = initial_schema
+            .or_else(|| {
+                schema_names
+                    .iter()
+                    .find(|name| name.as_str() == "default")
+                    .cloned()
+            })
             .or_else(|| schema_names.first().cloned())
             .context("no schema files found")?;
         let schema_definition = schema::load_schema(&selected_schema_name)?;
         let app_keybinds = schema::load_app_keybinds()?;
-        let browser_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let browser_dir = browser_dir.unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        });
 
         cc.egui_ctx.set_pixels_per_point(1.25);
 

@@ -301,6 +301,70 @@ pub fn import_schema_from_file(path: &Path) -> Result<(String, PathBuf, SchemaDe
     Ok((name, saved_path, schema))
 }
 
+/// A validated schema file supplied on the command line.
+pub struct SchemaFile {
+    /// Schema name derived from the normalized file stem.
+    pub name: String,
+    /// The file's contents, written to the config directory verbatim.
+    pub content: String,
+}
+
+/// Reads and validates a schema `.toml` file without touching the config directory.
+pub fn read_schema_file(source: &Path) -> Result<SchemaFile> {
+    let content = fs::read_to_string(source)
+        .with_context(|| format!("failed to read {}", source.display()))?;
+    let schema: SchemaDefinition = toml::from_str(&content)
+        .with_context(|| format!("failed to parse {}", source.display()))?;
+    if schema.labels.is_empty() {
+        bail!("{} must contain at least one label", source.display());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for label in &schema.labels {
+        let label_name = label.name.trim();
+        if label_name.is_empty() {
+            bail!("{}: labels cannot have an empty name", source.display());
+        }
+        if !seen.insert(label_name.to_ascii_lowercase()) {
+            bail!("{}: label `{label_name}` is duplicated", source.display());
+        }
+    }
+
+    let name = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(normalize_schema_name)
+        .unwrap_or_default();
+    if name.is_empty() {
+        bail!("cannot derive a schema name from {}", source.display());
+    }
+    if format!("{name}.toml") == APP_KEYBINDS_FILE {
+        bail!("`{APP_KEYBINDS_FILE}` is reserved for app settings; rename the schema file");
+    }
+    Ok(SchemaFile { name, content })
+}
+
+/// Returns the normalized schema name if a schema called `name` is in the config directory.
+pub fn find_schema(name: &str) -> Result<Option<String>> {
+    let normalized = normalize_schema_name(name);
+    Ok(list_schema_names()?
+        .into_iter()
+        .find(|existing| *existing == normalized))
+}
+
+/// Path a schema called `name` is stored at in the config directory.
+pub fn schema_file_path(name: &str) -> Result<PathBuf> {
+    schema_path(name)
+}
+
+/// Writes `file` into the config directory, replacing any schema with the same name.
+pub fn write_schema_file(file: &SchemaFile) -> Result<PathBuf> {
+    ensure_default_files()?;
+    let path = schema_path(&file.name)?;
+    fs::write(&path, &file.content)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
 pub fn app_keybinds_path() -> Result<PathBuf> {
     Ok(config_dir()?.join(APP_KEYBINDS_FILE))
 }

@@ -30,6 +30,18 @@ By default the app creates `labels.sqlite3` in the current working directory. Us
 image-labeler --db path/to/labels.sqlite3
 ```
 
+Other startup options:
+
+- `--schema my-schema` starts with an existing schema from the config directory. If there's no schema with that name, the available ones are listed.
+- `--schema path/to/my-schema.toml` adds the schema in that file and starts with it. Its name is the normalized file name, here `my-schema`.
+  - If no schema with that name is in the config directory, the file is validated and copied there.
+  - If one exists with different contents, you're asked whether to overwrite it. Answering no, or launching without a terminal (e.g. from a shortcut), keeps the existing schema.
+- `--input path/to/images` sets the directory the file browser starts in (default: the current directory).
+
+```bash
+image-labeler --db labels.sqlite3 --schema schemas/lesions.toml --input /data/scans
+```
+
 On first launch it also creates a default schema file at:
 
 ```bash
