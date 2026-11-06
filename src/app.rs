@@ -20,6 +20,9 @@ const HANDLE_HIT_RADIUS: f32 = 10.0;
 const DRAG_BRIGHTNESS_PER_PIXEL: f32 = 0.004;
 const DRAG_CONTRAST_PER_PIXEL: f32 = 0.005;
 const MAX_HISTORY: usize = 200;
+/// Default minimum on-screen distance (pixels) between vertices when shift-drag drawing a polygon.
+const FREEHAND_VERTEX_SPACING: f32 = 8.0;
+const FREEHAND_VERTEX_SPACING_RANGE: std::ops::RangeInclusive<f32> = 1.0..=50.0;
 
 #[derive(Clone)]
 struct LabelBinding {
@@ -93,6 +96,8 @@ pub struct LabelerApp {
     rect_start: Option<Point>,
     rect_current: Option<Point>,
     polygon_points: Vec<Point>,
+    polygon_freehand: bool,
+    freehand_vertex_spacing: f32,
     selected_annotation_id: Option<i64>,
     annotation_edit: Option<AnnotationEditState>,
     histories: HashMap<String, EditHistory>,
@@ -162,6 +167,8 @@ impl LabelerApp {
             rect_start: None,
             rect_current: None,
             polygon_points: Vec::new(),
+            polygon_freehand: false,
+            freehand_vertex_spacing: FREEHAND_VERTEX_SPACING,
             selected_annotation_id: None,
             annotation_edit: None,
             histories: HashMap::new(),
@@ -267,6 +274,7 @@ impl LabelerApp {
         self.rect_start = None;
         self.rect_current = None;
         self.polygon_points.clear();
+        self.polygon_freehand = false;
         self.annotation_edit = None;
     }
 
@@ -1323,6 +1331,15 @@ impl LabelerApp {
                                         }
                                         LabelType::Polygon => {
                                             ui.label("Primary click on empty space adds polygon vertices");
+                                            ui.label("Shift + primary drag draws vertices freehand");
+                                            ui.add(
+                                                egui::Slider::new(
+                                                    &mut self.freehand_vertex_spacing,
+                                                    FREEHAND_VERTEX_SPACING_RANGE,
+                                                )
+                                                .suffix(" px")
+                                                .text("Freehand vertex spacing"),
+                                            );
                                             ui.label("Press Enter or Finish to close");
                                             ui.label("Press Escape or Cancel to discard");
                                             if ui.button("Finish polygon").clicked() {
@@ -1490,6 +1507,7 @@ impl LabelerApp {
 
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) && !self.polygon_points.is_empty()
         {
+            self.polygon_freehand = false;
             self.polygon_points.clear();
             self.status = "Polygon cancelled".to_string();
             return;
@@ -1522,6 +1540,46 @@ impl LabelerApp {
         let image_point = display_point
             .map(|display_point| self.transform_display_to_image(display_point, image))
             .map(|point| clamp_point_to_image(point, image));
+
+        let polygon_label_active = self
+            .selected_annotation_label()
+            .map(|label| label.label_type)
+            == Some(LabelType::Polygon);
+
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && shift_held
+            && polygon_label_active
+        {
+            self.polygon_freehand = true;
+            self.selected_annotation_id = None;
+            self.rect_start = None;
+            self.rect_current = None;
+        }
+
+        if self.polygon_freehand {
+            if let Some(point) = image_point {
+                let min_spacing = self.freehand_vertex_spacing / (fit_scale * self.zoom).max(0.01);
+                let far_enough = self
+                    .polygon_points
+                    .last()
+                    .map(|last| distance(*last, point) >= min_spacing)
+                    .unwrap_or(true);
+                if far_enough {
+                    self.polygon_points.push(point);
+                    ctx.request_repaint();
+                }
+            }
+            if response.drag_stopped_by(egui::PointerButton::Primary)
+                || !ctx.input(|input| input.pointer.primary_down())
+            {
+                self.polygon_freehand = false;
+                self.status = format!(
+                    "{} polygon vertices; press Enter to finish",
+                    self.polygon_points.len()
+                );
+            }
+            return;
+        }
 
         if let Some(point) = image_point {
             if response.drag_started_by(egui::PointerButton::Primary) {
